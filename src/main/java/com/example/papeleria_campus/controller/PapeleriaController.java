@@ -1,7 +1,7 @@
 
 package com.example.papeleria_campus.controller;
 
-import com.example.papeleria_campus.connection.DatabaseConnection;
+import com.example.papeleria_campus.dao.ProductoDAO;
 import com.example.papeleria_campus.models.Producto;
 
 import javafx.beans.property.ReadOnlyObjectWrapper;
@@ -12,19 +12,20 @@ import javafx.fxml.FXML;
 import javafx.scene.control.*;
 
 import java.math.BigDecimal;
-import java.sql.*;
+import java.sql.SQLException;
 import java.util.List;
 import java.util.Locale;
 
 public class PapeleriaController {
 
+    // Campos del formulario
     @FXML private TextField txtCodigo;
     @FXML private TextField txtNombre;
     @FXML private TextField txtPrecio;
     @FXML private TextField txtStock;
     @FXML private ComboBox<String> cmbCategoria;
 
-    // Campos de búsqueda
+    // Filtros
     @FXML private TextField txtBuscar;
     @FXML private TextField txtPrecioMin;
     @FXML private ComboBox<String> cmbfiltroCategoria;
@@ -33,18 +34,20 @@ public class PapeleriaController {
     // Tabla de productos
     @FXML private TableView<Producto> tablaProductos;
 
-    @FXML private TableColumn<Producto, Integer> colId;
     @FXML private TableColumn<Producto, String> colCodigo;
     @FXML private TableColumn<Producto, String> colNombre;
     @FXML private TableColumn<Producto, String> colCategoria;
     @FXML private TableColumn<Producto, BigDecimal> colPrecio;
     @FXML private TableColumn<Producto, Integer> colStock;
 
-    // Información
+    // Información del listado
     @FXML private Label lblContador;
     @FXML private Label lblEstado;
 
-    private final ObservableList<Producto> listaProductos =
+    // Acceso a datos
+    private final ProductoDAO productoDAO = new ProductoDAO();
+
+    private final ObservableList<Producto> productos =
             FXCollections.observableArrayList();
 
     private static final BigDecimal PRECIO_MAXIMO =
@@ -56,11 +59,12 @@ public class PapeleriaController {
             "Accesorios"
     );
 
-    // Inicializar controlador
+    // Inicialización
     @FXML
     public void initialize() {
 
         cmbCategoria.getItems().setAll(CATEGORIAS);
+        cmbCategoria.setEditable(false);
 
         cmbfiltroCategoria.getItems().setAll(
                 "Todas",
@@ -69,33 +73,27 @@ public class PapeleriaController {
                 "Accesorios"
         );
 
-        cmbCategoria.setEditable(false);
-        cmbfiltroCategoria.setEditable(false);
         cmbfiltroCategoria.setValue("Todas");
+        cmbfiltroCategoria.setEditable(false);
 
-        configurarTabla();
+        configurarColumnas();
 
-        tablaProductos.setItems(listaProductos);
+        tablaProductos.setItems(productos);
 
         tablaProductos.getSelectionModel()
                 .selectedItemProperty()
-                .addListener((obs, anterior, seleccionado) -> {
-                    if (seleccionado != null) {
-                        cargarFormulario(seleccionado);
+                .addListener((observable, anterior, actual) -> {
+
+                    if (actual != null) {
+                        cargarFormulario(actual);
                     }
                 });
 
         cargarProductos(null);
     }
 
-    // Configurar columnas del TableView
-    private void configurarTabla() {
-
-        colId.setCellValueFactory(
-                dato -> new ReadOnlyObjectWrapper<>(
-                        dato.getValue().getIdProducto()
-                )
-        );
+    // Configuración del TableView
+    private void configurarColumnas() {
 
         colCodigo.setCellValueFactory(
                 dato -> new ReadOnlyStringWrapper(
@@ -130,7 +128,10 @@ public class PapeleriaController {
         colPrecio.setCellFactory(columna -> new TableCell<>() {
 
             @Override
-            protected void updateItem(BigDecimal precio, boolean vacio) {
+            protected void updateItem(
+                    BigDecimal precio,
+                    boolean vacio
+            ) {
                 super.updateItem(precio, vacio);
 
                 if (vacio || precio == null) {
@@ -142,15 +143,15 @@ public class PapeleriaController {
         });
     }
 
-    // Consultar productos desde PostgreSQL
+    // Consultar PostgreSQL y actualizar la tabla
     private void cargarProductos(Integer idSeleccionado) {
 
-        BigDecimal precioMinimo;
+        BigDecimal minimo;
 
         try {
-            precioMinimo = obtenerPrecioMinimo();
+            minimo = validarPrecioMinimo();
         } catch (IllegalArgumentException e) {
-            mostrarMensaje(
+            mostrarAlerta(
                     Alert.AlertType.WARNING,
                     "Filtro inválido",
                     e.getMessage()
@@ -158,92 +159,31 @@ public class PapeleriaController {
             return;
         }
 
-        StringBuilder sql = new StringBuilder("""
-                SELECT id_producto, codigo, nombre,
-                       categoria, precio, stock
-                FROM catalogo.producto
-                WHERE 1=1
-                """);
-
-        String texto = txtBuscar.getText().trim();
-        String categoria = cmbfiltroCategoria.getValue();
-
-        if (!texto.isEmpty()) {
-            sql.append(" AND (codigo ILIKE ? OR nombre ILIKE ?)");
-        }
-
-        if (categoria != null && !categoria.equals("Todas")) {
-            sql.append(" AND categoria = ?");
-        }
-
-        if (precioMinimo != null) {
-            sql.append(" AND precio >= ?");
-        }
-
-        if (chkConExistencias.isSelected()) {
-            sql.append(" AND stock > 0");
-        }
-
-        sql.append(" ORDER BY codigo ASC");
+        Producto seleccionadoAnterior =
+                tablaProductos.getSelectionModel().getSelectedItem();
 
         Integer idConservar = idSeleccionado;
 
-        if (idConservar == null) {
-            Producto actual = tablaProductos
-                    .getSelectionModel().getSelectedItem();
-
-            if (actual != null) {
-                idConservar = actual.getIdProducto();
-            }
+        if (idConservar == null && seleccionadoAnterior != null) {
+            idConservar = seleccionadoAnterior.getIdProducto();
         }
 
-        try (Connection conexion = DatabaseConnection.getConnection();
-             PreparedStatement ps =
-                     conexion.prepareStatement(sql.toString())) {
+        try {
+            List<Producto> resultado = productoDAO.buscar(
+                    txtBuscar.getText(),
+                    cmbfiltroCategoria.getValue(),
+                    minimo,
+                    chkConExistencias.isSelected()
+            );
 
-            int indice = 1;
-
-            if (!texto.isEmpty()) {
-                ps.setString(indice++, "%" + texto + "%");
-                ps.setString(indice++, "%" + texto + "%");
-            }
-
-            if (categoria != null && !categoria.equals("Todas")) {
-                ps.setString(indice++, categoria);
-            }
-
-            if (precioMinimo != null) {
-                ps.setBigDecimal(indice++, precioMinimo);
-            }
-
-            ObservableList<Producto> resultados =
-                    FXCollections.observableArrayList();
-
-            try (ResultSet rs = ps.executeQuery()) {
-
-                while (rs.next()) {
-
-                    Producto producto = new Producto(
-                            rs.getInt("id_producto"),
-                            rs.getString("codigo"),
-                            rs.getString("nombre"),
-                            rs.getString("categoria"),
-                            rs.getBigDecimal("precio"),
-                            rs.getInt("stock")
-                    );
-
-                    resultados.add(producto);
-                }
-            }
-
-            listaProductos.setAll(resultados);
+            productos.setAll(resultado);
 
             lblContador.setText(
-                    "Registros visibles: " + listaProductos.size()
+                    "Registros visibles: " + productos.size()
             );
 
             lblEstado.setText(
-                    listaProductos.isEmpty() ? "Sin coincidencias" : ""
+                    productos.isEmpty() ? "Sin coincidencias" : ""
             );
 
             tablaProductos.setPlaceholder(
@@ -252,33 +192,33 @@ public class PapeleriaController {
 
             tablaProductos.getSelectionModel().clearSelection();
 
-            Producto encontrado = null;
-
             if (idConservar != null) {
-                for (Producto producto : listaProductos) {
+
+                Producto encontrado = null;
+
+                for (Producto producto : productos) {
                     if (producto.getIdProducto() == idConservar) {
                         encontrado = producto;
                         break;
                     }
                 }
-            }
 
-            if (encontrado != null) {
-                tablaProductos.getSelectionModel().select(encontrado);
-            } else {
-                limpiarFormulario();
+                if (encontrado != null) {
+                    tablaProductos.getSelectionModel().select(encontrado);
+                } else {
+                    limpiarFormularioInterno();
+                }
             }
 
         } catch (SQLException e) {
 
-            listaProductos.clear();
-            limpiarFormulario();
+            productos.clear();
 
             lblContador.setText("Registros visibles: --");
-            lblEstado.setText("Error de conexión o consulta");
+            lblEstado.setText("Error al consultar");
 
             tablaProductos.setPlaceholder(
-                    new Label("Error al consultar PostgreSQL")
+                    new Label("No se pudieron cargar los productos")
             );
 
             manejarErrorSQL("CONSULTAR", e);
@@ -289,7 +229,7 @@ public class PapeleriaController {
     @FXML
     private void NuevoProducto() {
 
-        limpiarFormulario();
+        limpiarFormularioInterno();
         txtCodigo.requestFocus();
     }
 
@@ -297,53 +237,40 @@ public class PapeleriaController {
     @FXML
     private void GuardarProducto() {
 
-        Producto producto;
-
         try {
-            producto = obtenerDatosFormulario(0);
-        } catch (IllegalArgumentException e) {
-            mostrarMensaje(
-                    Alert.AlertType.WARNING,
-                    "Validación",
-                    e.getMessage()
-            );
-            return;
-        }
+            Producto producto = obtenerFormulario(0);
 
-        String sql = """
-                INSERT INTO catalogo.producto
-                (codigo, nombre, categoria, precio, stock)
-                VALUES (?, ?, ?, ?, ?)
-                """;
-
-        try (Connection conexion = DatabaseConnection.getConnection();
-             PreparedStatement ps =
-                     conexion.prepareStatement(sql)) {
-
-            asignarParametros(ps, producto);
-
-            int filas = ps.executeUpdate();
+            int filas = productoDAO.insertar(producto);
 
             if (filas == 1) {
 
-                limpiarFormulario();
+                limpiarFormularioInterno();
                 cargarProductos(null);
 
-                mostrarMensaje(
+                mostrarAlerta(
                         Alert.AlertType.INFORMATION,
-                        "Guardar producto",
-                        "Producto guardado correctamente."
+                        "Producto guardado",
+                        "El producto se registró correctamente."
                 );
 
             } else {
-                mostrarMensaje(
+                mostrarAlerta(
                         Alert.AlertType.WARNING,
-                        "Guardar producto",
+                        "No se guardó",
                         "No se insertó ningún registro."
                 );
             }
 
+        } catch (IllegalArgumentException e) {
+
+            mostrarAlerta(
+                    Alert.AlertType.WARNING,
+                    "Validación",
+                    e.getMessage()
+            );
+
         } catch (SQLException e) {
+
             manejarErrorSQL("GUARDAR", e);
         }
     }
@@ -352,77 +279,58 @@ public class PapeleriaController {
     @FXML
     private void ActualizarProducto() {
 
-        Producto seleccionado = tablaProductos
-                .getSelectionModel().getSelectedItem();
+        Producto seleccionado =
+                tablaProductos.getSelectionModel().getSelectedItem();
 
         if (seleccionado == null) {
 
-            mostrarMensaje(
+            mostrarAlerta(
                     Alert.AlertType.WARNING,
-                    "Actualizar producto",
-                    "Seleccione un producto de la tabla."
+                    "Seleccionar producto",
+                    "Debe seleccionar un producto para actualizar."
             );
 
             return;
         }
-
-        Producto producto;
 
         try {
-            producto = obtenerDatosFormulario(
+            Producto producto = obtenerFormulario(
                     seleccionado.getIdProducto()
             );
-        } catch (IllegalArgumentException e) {
-            mostrarMensaje(
-                    Alert.AlertType.WARNING,
-                    "Validación",
-                    e.getMessage()
-            );
-            return;
-        }
 
-        String sql = """
-                UPDATE catalogo.producto
-                SET codigo = ?,
-                    nombre = ?,
-                    categoria = ?,
-                    precio = ?,
-                    stock = ?
-                WHERE id_producto = ?
-                """;
-
-        try (Connection conexion = DatabaseConnection.getConnection();
-             PreparedStatement ps =
-                     conexion.prepareStatement(sql)) {
-
-            asignarParametros(ps, producto);
-
-            ps.setInt(6, producto.getIdProducto());
-
-            int filas = ps.executeUpdate();
+            int filas = productoDAO.actualizar(producto);
 
             if (filas == 0) {
 
-                mostrarMensaje(
+                mostrarAlerta(
                         Alert.AlertType.WARNING,
-                        "Actualizar producto",
-                        "El producto ya no existe."
+                        "Producto no encontrado",
+                        "El producto ya no existe en la base de datos."
                 );
 
-                limpiarFormulario();
+                limpiarFormularioInterno();
                 cargarProductos(null);
                 return;
             }
 
             cargarProductos(producto.getIdProducto());
 
-            mostrarMensaje(
+            mostrarAlerta(
                     Alert.AlertType.INFORMATION,
-                    "Actualizar producto",
-                    "Producto actualizado correctamente."
+                    "Producto actualizado",
+                    "El producto se actualizó correctamente."
+            );
+
+        } catch (IllegalArgumentException e) {
+
+            mostrarAlerta(
+                    Alert.AlertType.WARNING,
+                    "Validación",
+                    e.getMessage()
             );
 
         } catch (SQLException e) {
+
             manejarErrorSQL("ACTUALIZAR", e);
         }
     }
@@ -431,75 +339,78 @@ public class PapeleriaController {
     @FXML
     private void EliminarProducto() {
 
-        Producto seleccionado = tablaProductos
-                .getSelectionModel().getSelectedItem();
+        Producto seleccionado =
+                tablaProductos.getSelectionModel().getSelectedItem();
 
         if (seleccionado == null) {
 
-            mostrarMensaje(
+            mostrarAlerta(
                     Alert.AlertType.WARNING,
-                    "Eliminar producto",
-                    "Seleccione un producto de la tabla."
+                    "Seleccionar producto",
+                    "Debe seleccionar un producto para eliminar."
             );
 
             return;
         }
 
+        ButtonType confirmar = new ButtonType(
+                "Eliminar",
+                ButtonBar.ButtonData.OK_DONE
+        );
+
+        ButtonType cancelar = new ButtonType(
+                "Cancelar",
+                ButtonBar.ButtonData.CANCEL_CLOSE
+        );
+
         Alert confirmacion = new Alert(
-                Alert.AlertType.CONFIRMATION
+                Alert.AlertType.CONFIRMATION,
+                "¿Desea eliminar el producto " +
+                        seleccionado.getNombre() + "?",
+                confirmar,
+                cancelar
         );
 
-        confirmacion.setTitle("Eliminar producto");
-        confirmacion.setHeaderText(
-                "¿Desea eliminar este producto?"
-        );
+        confirmacion.setTitle("Confirmar eliminación");
+        confirmacion.setHeaderText("Eliminar producto");
 
-        confirmacion.setContentText(
-                seleccionado.getCodigo() + " - " +
-                        seleccionado.getNombre()
-        );
+        ButtonType respuesta = confirmacion
+                .showAndWait()
+                .orElse(cancelar);
 
-        if (confirmacion.showAndWait()
-                .orElse(ButtonType.CANCEL) != ButtonType.OK) {
+        if (respuesta != confirmar) {
             return;
         }
 
-        String sql = """
-                DELETE FROM catalogo.producto
-                WHERE id_producto = ?
-                """;
-
-        try (Connection conexion = DatabaseConnection.getConnection();
-             PreparedStatement ps =
-                     conexion.prepareStatement(sql)) {
-
-            ps.setInt(1, seleccionado.getIdProducto());
-
-            int filas = ps.executeUpdate();
+        try {
+            int filas = productoDAO.eliminar(
+                    seleccionado.getIdProducto()
+            );
 
             if (filas == 0) {
 
-                mostrarMensaje(
+                mostrarAlerta(
                         Alert.AlertType.WARNING,
-                        "Eliminar producto",
-                        "El producto ya no existe."
+                        "Producto no encontrado",
+                        "El producto ya no existe en la base de datos."
                 );
 
-                limpiarFormulario();
+                limpiarFormularioInterno();
                 cargarProductos(null);
                 return;
             }
 
-            limpiarFormulario();
+            limpiarFormularioInterno();
             cargarProductos(null);
 
-            mostrarMensaje(
+            mostrarAlerta(
                     Alert.AlertType.INFORMATION,
-                    "Eliminar producto",
-                    "Producto eliminado correctamente."
+                    "Producto eliminado",
+                    "El producto se eliminó correctamente."
             );
 
         } catch (SQLException e) {
+
             manejarErrorSQL("ELIMINAR", e);
         }
     }
@@ -507,7 +418,6 @@ public class PapeleriaController {
     // Botón Buscar
     @FXML
     private void BuscarProducto() {
-
         cargarProductos(null);
     }
 
@@ -527,11 +437,10 @@ public class PapeleriaController {
     // Botón Recargar
     @FXML
     private void RecargarProductos() {
-
         cargarProductos(null);
     }
 
-    // Cargar producto seleccionado al formulario
+    // Mostrar datos del producto seleccionado
     private void cargarFormulario(Producto producto) {
 
         txtCodigo.setText(producto.getCodigo());
@@ -548,8 +457,8 @@ public class PapeleriaController {
         );
     }
 
-    // Limpiar campos del formulario
-    private void limpiarFormulario() {
+    // Limpiar formulario sin modificar filtros
+    private void limpiarFormularioInterno() {
 
         tablaProductos.getSelectionModel().clearSelection();
 
@@ -561,49 +470,53 @@ public class PapeleriaController {
         cmbCategoria.getSelectionModel().clearSelection();
     }
 
-    // Validar y obtener datos del formulario
-    private Producto obtenerDatosFormulario(int idProducto) {
+    // Leer y validar los campos del formulario
+    private Producto obtenerFormulario(int idProducto) {
 
         String codigo = txtCodigo.getText()
                 .trim()
                 .toUpperCase(Locale.ROOT);
 
         String nombre = txtNombre.getText().trim();
+
         String categoria = cmbCategoria.getValue();
 
-        String precioTexto = txtPrecio.getText().trim();
-        String stockTexto = txtStock.getText().trim();
+        String textoPrecio = txtPrecio.getText().trim();
 
-        // Código
+        String textoStock = txtStock.getText().trim();
+
+        // Validar código
         if (codigo.isEmpty() || codigo.length() > 10) {
             throw new IllegalArgumentException(
                     "El código debe tener entre 1 y 10 caracteres."
             );
         }
 
-        // Nombre
+        // Validar nombre
         if (nombre.length() < 3 || nombre.length() > 80) {
             throw new IllegalArgumentException(
                     "El nombre debe tener entre 3 y 80 caracteres."
             );
         }
 
-        // Categoría
+        // Validar categoría
         if (!CATEGORIAS.contains(categoria)) {
             throw new IllegalArgumentException(
-                    "Debe seleccionar una categoría válida."
+                    "Seleccione una categoría válida."
             );
         }
 
-        // Precio
-        if (!precioTexto.matches("-?\\d+(\\.\\d{1,2})?")) {
+        // Validar formato del precio
+        if (!textoPrecio.matches("-?\\d+(\\.\\d{1,2})?")) {
             throw new IllegalArgumentException(
-                    "Ingrese un precio numérico con máximo 2 decimales."
+                    "El precio debe ser numérico, utilizar punto " +
+                            "decimal y tener como máximo 2 decimales."
             );
         }
 
-        BigDecimal precio = new BigDecimal(precioTexto);
+        BigDecimal precio = new BigDecimal(textoPrecio);
 
+        // Validar rango del precio
         if (precio.compareTo(BigDecimal.ZERO) <= 0 ||
                 precio.compareTo(PRECIO_MAXIMO) > 0) {
 
@@ -612,8 +525,9 @@ public class PapeleriaController {
             );
         }
 
-        // Stock
-        if (!stockTexto.matches("-?\\d+")) {
+        // Validar formato del stock
+        if (!textoStock.matches("-?\\d+")) {
+
             throw new IllegalArgumentException(
                     "El stock debe ser un número entero."
             );
@@ -622,10 +536,11 @@ public class PapeleriaController {
         int stock;
 
         try {
-            stock = Integer.parseInt(stockTexto);
+            stock = Integer.parseInt(textoStock);
         } catch (NumberFormatException e) {
+
             throw new IllegalArgumentException(
-                    "El stock excede el rango permitido."
+                    "El stock excede el rango permitido de INTEGER."
             );
         }
 
@@ -635,6 +550,7 @@ public class PapeleriaController {
             );
         }
 
+        // Normalizar los campos en la interfaz
         txtCodigo.setText(codigo);
         txtNombre.setText(nombre);
 
@@ -648,8 +564,8 @@ public class PapeleriaController {
         );
     }
 
-    // Validar precio mínimo del filtro
-    private BigDecimal obtenerPrecioMinimo() {
+    // Validación del filtro de precio mínimo
+    private BigDecimal validarPrecioMinimo() {
 
         String texto = txtPrecioMin.getText().trim();
 
@@ -659,33 +575,20 @@ public class PapeleriaController {
 
         if (!texto.matches("\\d+(\\.\\d{1,2})?")) {
             throw new IllegalArgumentException(
-                    "El precio mínimo debe ser numérico y " +
-                            "tener como máximo 2 decimales."
+                    "El precio mínimo debe ser numérico " +
+                            "y tener como máximo 2 decimales."
             );
         }
 
-        BigDecimal precio = new BigDecimal(texto);
+        BigDecimal minimo = new BigDecimal(texto);
 
-        if (precio.compareTo(PRECIO_MAXIMO) > 0) {
+        if (minimo.compareTo(PRECIO_MAXIMO) > 0) {
             throw new IllegalArgumentException(
-                    "El precio mínimo excede el máximo permitido."
+                    "El precio mínimo excede el rango permitido."
             );
         }
 
-        return precio;
-    }
-
-    // Asignar valores a los PreparedStatement
-    private void asignarParametros(
-            PreparedStatement ps,
-            Producto producto
-    ) throws SQLException {
-
-        ps.setString(1, producto.getCodigo());
-        ps.setString(2, producto.getNombre());
-        ps.setString(3, producto.getCategoria());
-        ps.setBigDecimal(4, producto.getPrecio());
-        ps.setInt(5, producto.getStock());
+        return minimo;
     }
 
     // Manejar errores de PostgreSQL
@@ -696,9 +599,10 @@ public class PapeleriaController {
 
         String estado = e.getSQLState();
 
-        System.err.println(
-                "Operación: " + operacion +
-                        " | SQLState: " + estado
+        System.err.printf(
+                "Controlador | Operación: %s | SQLState: %s%n",
+                operacion,
+                estado
         );
 
         String mensaje;
@@ -711,30 +615,34 @@ public class PapeleriaController {
                 || "23502".equals(estado)
                 || "22003".equals(estado)) {
 
-            mensaje = "Los datos no cumplen las restricciones.";
+            mensaje = "Los datos no cumplen las " +
+                    "restricciones de PostgreSQL.";
 
         } else if (estado != null && estado.startsWith("08")) {
 
-            mensaje = "No se pudo conectar con PostgreSQL.";
+            mensaje = "No fue posible conectar con PostgreSQL. " +
+                    "Revise la configuración y el servidor.";
 
         } else if (estado != null && estado.startsWith("28")) {
 
-            mensaje = "Error de autenticación en PostgreSQL.";
+            mensaje = "No fue posible autenticar la conexión " +
+                    "con PostgreSQL.";
 
         } else {
 
-            mensaje = "No fue posible completar la operación.";
+            mensaje = "No fue posible completar la operación. " +
+                    "Verifique la conexión y los datos.";
         }
 
-        mostrarMensaje(
+        mostrarAlerta(
                 Alert.AlertType.ERROR,
-                "Error en base de datos",
+                "Error de base de datos",
                 mensaje
         );
     }
 
     // Mostrar mensajes
-    private void mostrarMensaje(
+    private void mostrarAlerta(
             Alert.AlertType tipo,
             String titulo,
             String mensaje

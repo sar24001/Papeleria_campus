@@ -104,5 +104,14 @@
             </columnResizePolicy>
         </TableView>
     </center>
+    <bottom>
+        <HBox spacing="20">
+            <padding>
+                <Insets bottom="10" left="20" right="20" top="5" />
+            </padding>
+            <Label fx:id="lblContador" text="Registros visibles: 0" style="-fx-font-weight: bold;" />
+            <Label fx:id="lblEstado" text="" style="-fx-text-fill: red;" />
+        </HBox>
+    </bottom>
 
 </BorderPane>
